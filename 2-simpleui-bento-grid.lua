@@ -1,30 +1,32 @@
 local original_require = require
 
--- Override standard require to patch specific KOReader modules as they load
-_G.require = function(modname)
+local function safeRequire(modname)
+    local ok, mod = pcall(original_require, modname)
+    if ok then return mod end
+end
 
+-- Override standard require to patch specific KOReader modules as they load.
+_G.require = function(modname)
     -- =========================================================
     -- Appearance Plugin Compatibility Fix (Color Devices)
     -- =========================================================
     if modname == "appearance.koplugin/book/progress_bar_colors" then
         local loaded = original_require(modname)
-        local pw_ok, ProgressWidget = pcall(original_require, "ui/widget/progresswidget")
-        
-        if pw_ok and ProgressWidget and type(ProgressWidget) == "table" and not ProgressWidget._bento_shield then
-            
-            -- Safely execute the original update method to prevent errors during method chaining
+        local ProgressWidget = safeRequire("ui/widget/progresswidget")
+
+        if ProgressWidget and type(ProgressWidget) == "table" and not ProgressWidget._bento_shield then
             if type(ProgressWidget.updateStyle) == "function" then
                 local unsafe_update = ProgressWidget.updateStyle
-                ProgressWidget.updateStyle = function(self, ...) 
-                    local ok, res = pcall(unsafe_update, self, ...) 
+                ProgressWidget.updateStyle = function(self, ...)
+                    local ok, res = pcall(unsafe_update, self, ...)
                     if ok then return res end
                 end
             end
-            
+
             if type(ProgressWidget._setColors) == "function" then
                 local unsafe_set = ProgressWidget._setColors
-                ProgressWidget._setColors = function(self, ...) 
-                    local ok, res = pcall(unsafe_set, self, ...) 
+                ProgressWidget._setColors = function(self, ...)
+                    local ok, res = pcall(unsafe_set, self, ...)
                     if ok then return res end
                 end
             end
@@ -33,14 +35,13 @@ _G.require = function(modname)
         return loaded
 
     -- =========================================================
-    -- Bento Grid Layout Engine
+    -- Bento Grid Layout Engine for SimpleUI 2.x
     -- =========================================================
     elseif modname == "sui_homescreen" then
         local loaded = original_require(modname)
-        
-        -- Search through upvalues to find the HomescreenWidget class. 
-        -- Doing it this way prevents conflicts with the Appearance plugin's background rendering.
+
         local function getUpValue(func, name)
+            if type(func) ~= "function" then return nil end
             local i = 1
             while true do
                 local n, v = debug.getupvalue(func, i)
@@ -51,256 +52,519 @@ _G.require = function(modname)
         end
 
         local HomescreenWidget = getUpValue(loaded.show, "HomescreenWidget")
-        
-        if HomescreenWidget and not loaded._bento_patched then
-
-            -- 1. Inject the Bento Grid settings into the context menu of each module
-            local Registry = original_require("desktop_modules/moduleregistry")
-            if Registry and Registry.list and not Registry._bento_menu_patched then
-                for _, mod in ipairs(Registry.list()) do
-                    if type(mod.getMenuItems) == "function" and not mod._bento_menu_patched then
-                        local orig_getMenuItems = mod.getMenuItems
-                        
-                        mod.getMenuItems = function(ctx_menu)
-                            local items = orig_getMenuItems(ctx_menu)
-                            if type(items) == "table" then
-                                table.insert(items, {
-                                    text_func = function()
-                                        local cur_val = _G.G_reader_settings:readSetting("simpleui_bento_width_" .. mod.id) or 100
-                                        return "Bento Grid Column Width (" .. cur_val .. "%)"
-                                    end,
-                                    keep_menu_open = true,
-                                    separator = true,
-                                    callback = function()
-                                        local UIManager  = original_require("ui/uimanager")
-                                        local SpinWidget = original_require("ui/widget/spinwidget")
-                                        local cur_val = _G.G_reader_settings:readSetting("simpleui_bento_width_" .. mod.id) or 100
-                                        
-                                        UIManager:show(SpinWidget:new{
-                                            title_text    = "Bento Grid Column Width",
-                                            info_text     = "Set the layout width for the Bento Grid.\n(e.g., 50 = 50% width, 100 = full row)",
-                                            value         = cur_val,
-                                            value_min     = 20,
-                                            value_max     = 100,
-                                            value_step    = 5,
-                                            unit          = "%",
-                                            ok_text       = "Apply",
-                                            cancel_text   = "Cancel",
-                                            default_value = 100,
-                                            callback      = function(spin)
-                                                _G.G_reader_settings:saveSetting("simpleui_bento_width_" .. mod.id, spin.value)
-                                                if ctx_menu.refresh then ctx_menu.refresh() end
-                                            end,
-                                        })
-                                    end,
-                                })
-                            end
-                            return items
-                        end
-                        mod._bento_menu_patched = true
-                    end
-                end
-                Registry._bento_menu_patched = true
-            end
-
-            -- 2. Patch the page update and render hooks directly on the prototype
-            local orig_updatePage = HomescreenWidget._updatePage
-
-            HomescreenWidget._updatePage = function(self, keep_cache, books_only)
-                local Screen = original_require("device").screen
-                if Screen:getWidth() > Screen:getHeight() then return orig_updatePage(self, keep_cache, books_only) end
-
-                _G.BENTO_MOD_SCALES = _G.BENTO_MOD_SCALES or {}
-                local gap = 15
-                local inner_w = self._layout_inner_w or (Screen:getWidth() - 40)
-                
-                local modules_built = 0
-                local orig_builds = {}
-                local modules = Registry.list and Registry.list() or {}
-                
-                if _G.G_reader_settings then
-                    for _, mod in ipairs(modules) do
-                        local w_val = _G.G_reader_settings:readSetting("simpleui_bento_width_" .. mod.id)
-                        _G.BENTO_MOD_SCALES[mod.id] = w_val and (w_val / 100.0) or 1.0
-                    end
-                end
-                
-                for _, mod in ipairs(modules) do
-                    if type(mod.build) == "function" then
-                        local m_id = mod.id
-                        local m_orig = mod.build
-                        orig_builds[m_id] = m_orig
-                        
-                        mod.build = function(w, ctx)
-                            _G.BENTO_ACTIVE_MOD_ID = m_id
-                            local pct = _G.BENTO_MOD_SCALES[m_id] or 1.0
-                            local bw = (pct < 1.0) and math.floor((w * pct) - (gap / 2)) - 2 or w
-                            return m_orig(bw, ctx)
-                        end
-                    end
-                end
-
-                local orig_makeModWrapper = self._makeModWrapper
-                self._makeModWrapper = function(this, mod, widget, w)
-                    modules_built = modules_built + 1
-                    local m_id = mod.id or _G.BENTO_ACTIVE_MOD_ID
-                    local pct = _G.BENTO_MOD_SCALES[m_id] or 1.0
-                    local bw = (pct < 1.0) and math.floor((w * pct) - (gap / 2)) - 2 or w
-                    
-                    local wrapped = orig_makeModWrapper(this, mod, widget, bw)
-                    if wrapped and type(wrapped) == "table" then
-                        wrapped._bento_mod_id = m_id
-                        wrapped._bento_bw = bw
-                        
-                        -- Update the internal dimension table so touch hitboxes and long-press highlights match the scaled width
-                        if wrapped.dimen then wrapped.dimen.w = bw end
-                    end
-                    return wrapped
-                end
-
-                local ok, err = pcall(orig_updatePage, self, keep_cache, books_only)
-
-                for _, mod in ipairs(modules) do
-                    if orig_builds[mod.id] then mod.build = orig_builds[mod.id] end
-                end
-                self._makeModWrapper = orig_makeModWrapper
-
-                if not ok then return end
-                if modules_built == 0 then return end
-
-                local FrameContainer = original_require("ui/widget/container/framecontainer")
-                local TextWidget = original_require("ui/widget/textwidget")
-                local ui_pad = 20
-                pcall(function() ui_pad = original_require("sui_core").PAD * 2 end)
-
-                local children = {}
-                for i = 1, #self._body do
-                    children[i] = self._body[i]
-                    self._body[i] = nil
-                end
-
-                local chunks = {}
-                local pre_build_widgets = {}
-                local post_build_widgets = {}
-                local pending_untagged = {}
-
-                for i, w in ipairs(children) do
-                    if type(w) == "table" and w._bento_mod_id then
-                        local chunk = { mod_id = w._bento_mod_id, widgets = {} }
-                        for _, uw in ipairs(pending_untagged) do table.insert(chunk.widgets, uw) end
-                        pending_untagged = {}
-                        table.insert(chunk.widgets, w)
-                        table.insert(chunks, chunk)
-                    else
-                        if #chunks == 0 and i == 1 then
-                            table.insert(pre_build_widgets, w)
-                        else
-                            table.insert(pending_untagged, w)
-                        end
-                    end
-                end
-                for _, uw in ipairs(pending_untagged) do table.insert(post_build_widgets, uw) end
-
-                for _, w in ipairs(pre_build_widgets) do self._body[#self._body + 1] = w end
-                
-                local HorizontalGroup = original_require("ui/widget/horizontalgroup")
-                local VerticalGroup = original_require("ui/widget/verticalgroup")
-                local HorizontalSpan = original_require("ui/widget/horizontalspan")
-
-                local current_row_cols = {}
-                local current_row_width = 0
-
-                local function flush_row()
-                    if #current_row_cols == 0 then return end
-                    
-                    -- Make the row container transparent so the homescreen background remains visible
-                    local h_group = HorizontalGroup:new{ align = "top", background = nil }
-                    for i, col in ipairs(current_row_cols) do
-                        
-                        -- Make the column container transparent
-                        local v_group = VerticalGroup:new{ align = "left", background = nil }
-                        for _, chunk in ipairs(col.chunks) do
-                            for _, w in ipairs(chunk.widgets) do
-                                
-                                local pct = _G.BENTO_MOD_SCALES[chunk.mod_id] or 1.0
-                                if pct < 1.0 and type(w) == "table" and w.is_a and w:is_a(FrameContainer) and w[1] and w[1].is_a and w[1]:is_a(TextWidget) then
-                                    local bw = w._bento_bw or (math.floor((inner_w * pct) - (gap / 2)) - 2)
-                                    w.width = bw
-                                    w[1].width = bw - ui_pad
-                                    w[1].max_width = bw - ui_pad 
-                                end
-
-                                v_group[#v_group + 1] = w 
-                                
-                                if type(w) == "table" and w._bento_mod_id == "clock" then 
-                                    self._clock_body_ref = v_group
-                                    self._clock_body_idx = #v_group 
-                                end
-                                if type(w) == "table" and w._bento_mod_id == "header" then 
-                                    self._header_body_ref = v_group
-                                    self._header_body_idx = #v_group 
-                                end
-                            end
-                        end
-                        h_group[#h_group + 1] = v_group
-                        if i < #current_row_cols then h_group[#h_group + 1] = HorizontalSpan:new{ width = gap } end
-                    end
-                    self._body[#self._body + 1] = h_group
-                    current_row_cols = {}
-                    current_row_width = 0
-                end
-
-                for _, chunk in ipairs(chunks) do
-                    local pct = _G.BENTO_MOD_SCALES[chunk.mod_id] or 1.0
-                    
-                    if pct >= 1.0 then
-                        flush_row()
-                        for _, w in ipairs(chunk.widgets) do 
-                            self._body[#self._body + 1] = w 
-                            if type(w) == "table" and w._bento_mod_id == "clock" then 
-                                self._clock_body_ref = self._body
-                                self._clock_body_idx = #self._body 
-                            end
-                            if type(w) == "table" and w._bento_mod_id == "header" then 
-                                self._header_body_ref = self._body
-                                self._header_body_idx = #self._body 
-                            end
-                        end
-                    else
-                        if current_row_width + pct <= 1.01 then
-                            table.insert(current_row_cols, { width = pct, chunks = { chunk } })
-                            current_row_width = current_row_width + pct
-                        else
-                            local stacked = false
-                            for _, col in ipairs(current_row_cols) do
-                                if math.abs(col.width - pct) < 0.01 then
-                                    table.insert(col.chunks, chunk)
-                                    stacked = true
-                                    break
-                                end
-                            end
-                            
-                            if not stacked then
-                                flush_row()
-                                table.insert(current_row_cols, { width = pct, chunks = { chunk } })
-                                current_row_width = pct
-                            end
-                        end
-                    end
-                end
-                
-                flush_row()
-                for _, w in ipairs(post_build_widgets) do self._body[#self._body + 1] = w end
-            end
-
-            loaded._bento_patched = true
+        if not HomescreenWidget or loaded._bento_patched then
+            return loaded
         end
+
+        local Registry = safeRequire("desktop_modules/moduleregistry")
+        local UIManager = safeRequire("ui/uimanager")
+        local SpinWidget = safeRequire("ui/widget/spinwidget")
+        local HorizontalGroup = safeRequire("ui/widget/horizontalgroup")
+        local VerticalGroup = safeRequire("ui/widget/verticalgroup")
+        local HorizontalSpan = safeRequire("ui/widget/horizontalspan")
+        local Device = safeRequire("device")
+
+        local function settingKey(mod_id)
+            return "simpleui_bento_width_" .. tostring(mod_id)
+        end
+
+        local function readWidthPct(mod_id)
+            local raw = _G.G_reader_settings and _G.G_reader_settings:readSetting(settingKey(mod_id))
+            local value = tonumber(raw) or 100
+            if value < 20 then value = 20 end
+            if value > 100 then value = 100 end
+            return value
+        end
+
+        local function patchModuleMenus()
+            if not Registry or not Registry.list then return end
+            for _, mod in ipairs(Registry.list()) do
+                if type(mod.getMenuItems) == "function" and not mod._bento_menu_patched then
+                    local orig_getMenuItems = mod.getMenuItems
+
+                    mod.getMenuItems = function(ctx_menu)
+                        local items = orig_getMenuItems(ctx_menu)
+                        if type(items) == "table" then
+                            items[#items + 1] = {
+                                text_func = function()
+                                    return "Bento Grid Column Width (" .. readWidthPct(mod.id) .. "%)"
+                                end,
+                                keep_menu_open = true,
+                                separator = true,
+                                callback = function()
+                                    if not UIManager or not SpinWidget then return end
+                                    UIManager:show(SpinWidget:new{
+                                        title_text    = "Bento Grid Column Width",
+                                        info_text     = "Set the module width used by the Bento Grid.\nModules that fit in the same row are placed side by side.",
+                                        value         = readWidthPct(mod.id),
+                                        value_min     = 20,
+                                        value_max     = 100,
+                                        value_step    = 5,
+                                        unit          = "%",
+                                        ok_text       = "Apply",
+                                        cancel_text   = "Cancel",
+                                        default_value = 100,
+                                        callback      = function(spin)
+                                            if _G.G_reader_settings then
+                                                _G.G_reader_settings:saveSetting(settingKey(mod.id), spin.value)
+                                            end
+                                            if ctx_menu and ctx_menu.refresh then ctx_menu.refresh() end
+                                        end,
+                                    })
+                                end,
+                            }
+                        end
+                        return items
+                    end
+                    mod._bento_menu_patched = true
+                end
+            end
+        end
+
+        patchModuleMenus()
+
+        local original_updatePage = HomescreenWidget._updatePage
+        if type(original_updatePage) ~= "function" then
+            loaded._bento_patched = true
+            return loaded
+        end
+
+        local deps = {
+            Config = getUpValue(original_updatePage, "Config") or safeRequire("sui_config"),
+            Registry = getUpValue(original_updatePage, "Registry") or Registry,
+            SUISettings = getUpValue(original_updatePage, "SUISettings") or safeRequire("sui_store"),
+            Screen = getUpValue(original_updatePage, "Screen") or (Device and Device.screen),
+            logger = getUpValue(original_updatePage, "logger") or safeRequire("logger"),
+            UI = getUpValue(original_updatePage, "UI") or safeRequire("sui_core"),
+            PFX = getUpValue(original_updatePage, "PFX") or "simpleui_hs_",
+            MOD_GAP = getUpValue(original_updatePage, "MOD_GAP") or 12,
+            SIDE_PAD = getUpValue(original_updatePage, "SIDE_PAD") or 20,
+            splitOrderIntoPages = getUpValue(original_updatePage, "splitOrderIntoPages"),
+            buildEmptyState = getUpValue(original_updatePage, "buildEmptyState"),
+            _isLandscape = getUpValue(original_updatePage, "_isLandscape"),
+            applyModuleBackground = getUpValue(original_updatePage, "applyModuleBackground"),
+            sectionLabel = getUpValue(original_updatePage, "sectionLabel"),
+            _updateNavpagerForHS = getUpValue(original_updatePage, "_updateNavpagerForHS"),
+            Homescreen = getUpValue(original_updatePage, "Homescreen"),
+            EMPTY_H = getUpValue(original_updatePage, "_EMPTY_H") or 80,
+        }
+
+        local function logWarn(msg)
+            if deps.logger and deps.logger.warn then
+                deps.logger.warn(msg)
+            end
+        end
+
+        local function canUseBento()
+            return deps.Config and deps.Registry and deps.SUISettings and deps.Screen
+                and deps.splitOrderIntoPages and deps.applyModuleBackground
+                and deps.sectionLabel and HorizontalGroup and VerticalGroup
+        end
+
+        local function modulePct(mod)
+            return readWidthPct(mod and mod.id) / 100
+        end
+
+        local function buildRows(mods)
+            local rows = {}
+            local row = { cols = {}, total_pct = 0 }
+
+            local function flush()
+                if #row.cols > 0 then
+                    rows[#rows + 1] = row
+                    row = { cols = {}, total_pct = 0 }
+                end
+            end
+
+            for _, mod in ipairs(mods) do
+                local pct = modulePct(mod)
+                if pct >= 0.999 then
+                    flush()
+                    rows[#rows + 1] = {
+                        cols = { { pct = 1, mods = { mod } } },
+                        total_pct = 1,
+                    }
+                elseif row.total_pct + pct <= 1.001 then
+                    row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
+                    row.total_pct = row.total_pct + pct
+                else
+                    local best_col
+                    local best_count
+                    for i = #row.cols, 1, -1 do
+                        local col = row.cols[i]
+                        if math.abs((col.pct or 0) - pct) < 0.01 then
+                            local count = #(col.mods or {})
+                            if not best_count or count < best_count then
+                                best_col = col
+                                best_count = count
+                            end
+                        end
+                    end
+                    if best_col then
+                        best_col.mods[#best_col.mods + 1] = mod
+                    else
+                        flush()
+                        row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
+                        row.total_pct = pct
+                    end
+                end
+            end
+            flush()
+            return rows
+        end
+
+        local function columnWidths(row, inner_w, gap)
+            local count = #row.cols
+            local total_pct = row.total_pct
+            if total_pct <= 0 then total_pct = 1 end
+            local row_w = math.floor(inner_w * math.min(total_pct, 1))
+            local available_w = math.max(1, row_w - gap * math.max(0, count - 1))
+            local widths = {}
+            local used = 0
+            for i, col in ipairs(row.cols) do
+                local w
+                if i == count then
+                    w = math.max(1, available_w - used)
+                else
+                    w = math.max(1, math.floor(available_w * (col.pct / total_pct)))
+                    used = used + w
+                end
+                widths[i] = w
+            end
+            return widths
+        end
+
+        local function addModToColumn(self, ctx, col_body, mod, col_w, topbar_on, is_first_in_col, state)
+            if not is_first_in_col then
+                col_body[#col_body + 1] = self:_vspan(state.mod_gaps[mod.id] or deps.MOD_GAP)
+            end
+
+            if mod.has_covers then state.page_has_covers = true end
+
+            local ok_w, widget = pcall(mod.build, col_w, ctx)
+            if not ok_w or not widget then
+                logWarn("simpleui bento: build failed for " .. tostring(mod.id) .. ": " .. tostring(widget))
+                return
+            end
+
+            local bg_enabled = deps.Config.isModuleBackgroundEnabled(mod.id, deps.PFX)
+            if mod.label and not bg_enabled then
+                col_body[#col_body + 1] = deps.sectionLabel(mod.label, col_w, mod.id)
+            end
+
+            local has_menu = type(mod.getMenuItems) == "function"
+            if mod.id == "header" then
+                self._header_body_idx = #col_body + 1
+                self._header_body_ref = col_body
+                self._header_is_wrapped = has_menu
+            end
+            if mod.id == "clock" then
+                self._clock_body_idx = #col_body + 1
+                self._clock_body_ref = col_body
+                self._clock_is_wrapped = has_menu
+                self._clock_label = mod.label
+            end
+
+            local display_widget = deps.applyModuleBackground(mod.id, widget, col_w,
+                bg_enabled and mod.label or nil)
+            local entry_widget = has_menu
+                and self:_makeModWrapper(mod, display_widget, col_w)
+                or display_widget
+            col_body[#col_body + 1] = entry_widget
+
+            if mod.has_covers and type(mod.updateCovers) == "function" then
+                self._cover_mod_slots[mod.id] = {
+                    mod = mod,
+                    widget = widget,
+                }
+            end
+            if mod.is_book_mod then
+                self._book_mod_slots[mod.id] = {
+                    mod = mod,
+                    widget = widget,
+                    parent = col_body,
+                    index = #col_body,
+                    col_w = col_w,
+                    has_menu = has_menu,
+                }
+            end
+            if type(mod.updateStats) == "function" then
+                self._stats_mod_slots[mod.id] = { mod = mod, widget = widget }
+            end
+        end
+
+        local function bentoUpdatePage(self, keep_cache, books_only, stats_only)
+            patchModuleMenus()
+
+            local Config = deps.Config
+            local Registry = deps.Registry
+            local SUISettings = deps.SUISettings
+            local Screen = deps.Screen
+            local PFX = deps.PFX
+            local MOD_GAP = deps.MOD_GAP
+
+            if not canUseBento() then
+                return original_updatePage(self, keep_cache, books_only, stats_only)
+            end
+            if deps._isLandscape and deps._isLandscape() then
+                return original_updatePage(self, keep_cache, books_only, stats_only)
+            end
+            if Screen:getWidth() > Screen:getHeight() then
+                return original_updatePage(self, keep_cache, books_only, stats_only)
+            end
+
+            if not keep_cache then
+                if stats_only then
+                    self._ctx_cache = nil
+                else
+                    self._cached_books_state = nil
+                    if not books_only then
+                        self._enabled_mods_cache = nil
+                        self._ctx_cache = nil
+                    end
+                end
+            end
+
+            local ctx
+            if keep_cache and self._ctx_cache then
+                ctx = self._ctx_cache
+            else
+                ctx = self:_buildCtx()
+                self._ctx_cache = ctx
+            end
+
+            local inner_w = self._layout_inner_w or (Screen:getWidth() - deps.SIDE_PAD * 2)
+            local body = self._body
+            if not body then return end
+
+            local layout = SUISettings:readSetting("simpleui_layout")
+            local raw_order = Registry.loadOrder(PFX)
+
+            local layout_fingerprint = ""
+            local pages_by_id = {}
+            if layout and type(layout.pages) == "table" then
+                for _, page in ipairs(layout.pages) do
+                    local page_ids = {}
+                    for _, mod_id in ipairs(page.modules) do
+                        page_ids[#page_ids + 1] = mod_id
+                        layout_fingerprint = layout_fingerprint .. mod_id .. ","
+                    end
+                    layout_fingerprint = layout_fingerprint .. "|"
+                    pages_by_id[#pages_by_id + 1] = page_ids
+                end
+            else
+                pages_by_id = deps.splitOrderIntoPages(raw_order)
+                layout_fingerprint = table.concat(raw_order, ",")
+            end
+
+            if not self._enabled_mods_cache
+                    or self._enabled_mods_cache.layout_fingerprint ~= layout_fingerprint then
+                local has_book_mod = false
+                local mod_gaps = {}
+                local pages_of_mods = {}
+
+                for _, page_ids in ipairs(pages_by_id) do
+                    local page_mods = {}
+                    for _, mod_id in ipairs(page_ids) do
+                        local mod = Registry.get(mod_id)
+                        if mod and Registry.isEnabled(mod, PFX) then
+                            page_mods[#page_mods + 1] = mod
+                            mod_gaps[mod_id] = Config.getModuleGapPx(mod_id, PFX, MOD_GAP)
+                            if mod.is_book_mod then has_book_mod = true end
+                        end
+                    end
+                    pages_of_mods[#pages_of_mods + 1] = page_mods
+                end
+                if #pages_of_mods == 0 then pages_of_mods[1] = {} end
+
+                local chosen_pages = SUISettings:readSetting(PFX .. "homescreen_num_pages")
+                if layout and type(layout.pages) == "table" then chosen_pages = #layout.pages end
+                if chosen_pages and chosen_pages > #pages_of_mods then
+                    for _ = #pages_of_mods + 1, chosen_pages do
+                        pages_of_mods[#pages_of_mods + 1] = {}
+                    end
+                end
+
+                do
+                    local cd = Registry.get("coverdeck")
+                    if cd and Registry.isEnabled(cd, PFX) then
+                        local found = false
+                        for _, pg in ipairs(pages_of_mods) do
+                            for _, m in ipairs(pg) do
+                                if m.id == "coverdeck" then found = true; break end
+                            end
+                            if found then break end
+                        end
+                        if not found then
+                            local insert_at = #pages_of_mods[1] + 1
+                            for i, m in ipairs(pages_of_mods[1]) do
+                                if m.id == "recent" then insert_at = i + 1; break end
+                                if m.id == "currently" then insert_at = i + 1 end
+                            end
+                            table.insert(pages_of_mods[1], insert_at, cd)
+                            mod_gaps.coverdeck = Config.getModuleGapPx("coverdeck", PFX, MOD_GAP)
+                            if cd.is_book_mod then has_book_mod = true end
+                        end
+                    end
+                end
+
+                local enabled_mods = {}
+                for _, pg in ipairs(pages_of_mods) do
+                    for _, m in ipairs(pg) do enabled_mods[#enabled_mods + 1] = m end
+                end
+
+                self._enabled_mods_cache = {
+                    mods = enabled_mods,
+                    mod_gaps = mod_gaps,
+                    has_book_mod = has_book_mod,
+                    total_pages = #pages_of_mods,
+                    pages_of_mods = pages_of_mods,
+                    layout_fingerprint = layout_fingerprint,
+                }
+            end
+
+            local has_book_mod = self._enabled_mods_cache.has_book_mod
+            local total_pages = self._enabled_mods_cache.total_pages
+            local mod_gaps = self._enabled_mods_cache.mod_gaps
+            local pages_of_mods = self._enabled_mods_cache.pages_of_mods
+
+            if self._current_page > total_pages then self._current_page = total_pages end
+            if self._current_page < 1 then self._current_page = 1 end
+            self._total_pages = total_pages
+            self.page = self._current_page
+            self.page_num = total_pages
+
+            local empty_widget
+            if (ctx._show_c or ctx._show_r) and not ctx._has_content and not has_book_mod
+                    and deps.buildEmptyState then
+                empty_widget = deps.buildEmptyState(inner_w, deps.EMPTY_H)
+            end
+
+            body:clear()
+
+            local topbar_on = SUISettings:nilOrTrue("simpleui_topbar_enabled")
+
+            self._header_body_idx = nil
+            self._header_inner_w = inner_w
+            self._header_body_ref = body
+            self._header_is_wrapped = false
+            self._clock_body_idx = nil
+            self._clock_body_ref = body
+            self._stats_mod_slots = {}
+            self._book_mod_slots = {}
+            self._cover_mod_slots = {}
+            self._clock_is_wrapped = false
+            self._clock_label = nil
+
+            if not self._cover_poll_timer then
+                Config._cover_extract_pending = {}
+            end
+
+            local kb_books = {}
+            self._kb_first_rec_idx = nil
+            ctx.kb_currently_focused = nil
+            ctx.kb_recent_focus_idx = nil
+            if ctx.current_fp then
+                kb_books[#kb_books + 1] = ctx.current_fp
+                ctx.kb_currently_focused = (self._kb_focus_idx == #kb_books) or nil
+            end
+            if ctx.recent_fps and #ctx.recent_fps > 0 then
+                local first_rec_idx = #kb_books + 1
+                self._kb_first_rec_idx = first_rec_idx
+                for ri = 1, #ctx.recent_fps do
+                    kb_books[#kb_books + 1] = ctx.recent_fps[ri]
+                end
+                if self._kb_focus_idx and self._kb_focus_idx >= first_rec_idx
+                        and self._kb_focus_idx <= #kb_books then
+                    ctx.kb_recent_focus_idx = self._kb_focus_idx - first_rec_idx + 1
+                end
+            end
+            self._kb_book_items_fp = kb_books
+
+            local cur_page_mods = pages_of_mods[self._current_page] or {}
+            local first_row = true
+            local state = {
+                mod_gaps = mod_gaps,
+                page_has_covers = false,
+            }
+
+            local rows = buildRows(cur_page_mods)
+            local COL_GAP = MOD_GAP
+
+            for _, row in ipairs(rows) do
+                local first_mod_in_row = row.cols[1] and row.cols[1].mods and row.cols[1].mods[1]
+                if first_mod_in_row then
+                    local gap_px = mod_gaps[first_mod_in_row.id] or MOD_GAP
+                    if first_row then
+                        first_row = false
+                        body[#body + 1] = self:_vspan(topbar_on and gap_px or (gap_px + MOD_GAP))
+                    else
+                        body[#body + 1] = self:_vspan(gap_px)
+                    end
+                end
+
+                local widths = columnWidths(row, inner_w, COL_GAP)
+                local h_group = HorizontalGroup:new{ align = "top" }
+                local added_cols = 0
+
+                for col_idx, col in ipairs(row.cols) do
+                    local col_w = widths[col_idx] or inner_w
+                    local col_body = VerticalGroup:new{ align = "left" }
+                    for mod_idx, mod in ipairs(col.mods) do
+                        addModToColumn(self, ctx, col_body, mod, col_w, topbar_on, mod_idx == 1, state)
+                    end
+                    if #col_body > 0 then
+                        if added_cols > 0 then h_group[#h_group + 1] = HorizontalSpan:new{ width = COL_GAP } end
+                        h_group[#h_group + 1] = col_body
+                        added_cols = added_cols + 1
+                    end
+                end
+
+                if added_cols > 0 then body[#body + 1] = h_group end
+            end
+
+            if ctx.db_conn_fatal and self._db_conn then
+                logWarn("simpleui: homescreen: fatal DB error detected - dropping shared connection")
+                pcall(function() self._db_conn:close() end)
+                self._db_conn = nil
+            end
+
+            if empty_widget then
+                if first_row then
+                    body[#body + 1] = self:_vspan(topbar_on and MOD_GAP or (MOD_GAP * 2))
+                end
+                body[#body + 1] = empty_widget
+            end
+
+            self.dithered = state.page_has_covers or nil
+
+            local footer_page = self._current_page
+            local footer_total = total_pages
+            if self._updateFooter then self:_updateFooter(footer_page, footer_total, topbar_on) end
+            if deps._updateNavpagerForHS then deps._updateNavpagerForHS(footer_page, footer_total) end
+
+            if self._clock_body_idx ~= nil then
+                local ClockMod = Registry.get("clock")
+                if ClockMod and ClockMod.scheduleRefresh then
+                    ClockMod.scheduleRefresh(self)
+                end
+            end
+
+            if Config.flushCoverQueue then Config.flushCoverQueue() end
+            if Config.cover_extraction_pending and not self._cover_poll_timer and self._scheduleCoverPoll then
+                self:_scheduleCoverPoll()
+            end
+        end
+
+        HomescreenWidget._updatePage = function(self, keep_cache, books_only, stats_only)
+            return bentoUpdatePage(self, keep_cache, books_only, stats_only)
+        end
+
+        loaded._bento_patched = true
         return loaded
-        
-    else
-        -- Fallback for all other modules
-        return original_require(modname)
     end
+
+    return original_require(modname)
 end
 
 return {}

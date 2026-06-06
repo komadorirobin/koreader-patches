@@ -4,6 +4,8 @@ Copy desired patch files to <code>.adds/koreader/patches</code>
 <h2>Bento Grid (For SimpleUI)</h2>
 <p></p><code>2-simpleui-bento-grid.lua</code></p>
 <p>Long press to set module widths and have them automatically slot into a grid like a bento lunch box.</p>
+<p>This fork updates the Bento Grid patch for SimpleUI 2.x. Modules are now built with their assigned column width before SimpleUI wraps labels, module backgrounds, cover slots, and long-press hitboxes. This avoids the overlap seen when the old patch tried to resize and repack already-built SimpleUI 2.x widgets.</p>
+<p>Install by copying <code>2-simpleui-bento-grid.lua</code> to <code>.adds/koreader/patches</code>, then restart KOReader.</p>
 
 <h2>Calendar Highlight Colors (Appearance plugin)</h2>
 <h3>app-calendar-highlight-colors.patch.zip</h3>
