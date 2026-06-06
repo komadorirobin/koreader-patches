@@ -1,4 +1,5 @@
 local original_require = require
+local BENTO_GRID_PATCH_VERSION = "2.0.1"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
