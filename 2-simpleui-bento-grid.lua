@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.1"
+local BENTO_GRID_PATCH_VERSION = "2.0.2"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -312,6 +312,28 @@ _G.require = function(modname)
             end
             if Screen:getWidth() > Screen:getHeight() then
                 return original_updatePage(self, keep_cache, books_only, stats_only)
+            end
+
+            -- SimpleUI may re-wrap the homescreen around a fresh navbar/topbar
+            -- during startup, resume or reader-close. Keep Bento's cached
+            -- geometry in lockstep before measuring modules, otherwise the
+            -- first paint can use stale full-screen height and let old content
+            -- show through transparent areas until the next page turn.
+            if deps.UI and type(deps.UI.getContentHeight) == "function" then
+                local content_h = deps.UI.getContentHeight()
+                if content_h and content_h > 0 then
+                    self._navbar_content_h = content_h
+                    self._layout_content_h = content_h
+                    if self._overlap and self._overlap.dimen then
+                        self._overlap.dimen.h = content_h
+                    end
+                    if self._footer_bc and self._footer_bc.dimen then
+                        self._footer_bc.dimen.h = content_h
+                    end
+                    if self._navbar_inner and self._navbar_inner.dimen then
+                        self._navbar_inner.dimen.h = content_h
+                    end
+                end
             end
 
             if not keep_cache then
