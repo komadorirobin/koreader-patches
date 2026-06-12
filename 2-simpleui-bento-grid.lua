@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.3"
+local BENTO_GRID_PATCH_VERSION = "2.0.4"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -221,29 +221,8 @@ _G.require = function(modname)
                     row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
                     row.total_pct = row.total_pct + pct
                 else
-                    if row.total_pct >= 0.999 then
-                        flush()
-                        startRow(mod, pct)
-                    else
-                        local best_col
-                        local best_count
-                        for i = #row.cols, 1, -1 do
-                            local col = row.cols[i]
-                            if math.abs((col.pct or 0) - pct) < 0.01 then
-                                local count = #(col.mods or {})
-                                if not best_count or count < best_count then
-                                    best_col = col
-                                    best_count = count
-                                end
-                            end
-                        end
-                        if best_col then
-                            best_col.mods[#best_col.mods + 1] = mod
-                        else
-                            flush()
-                            startRow(mod, pct)
-                        end
-                    end
+                    flush()
+                    startRow(mod, pct)
                 end
             end
             flush()
