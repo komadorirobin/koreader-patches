@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.2"
+local BENTO_GRID_PATCH_VERSION = "2.0.3"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -166,6 +166,33 @@ _G.require = function(modname)
             return readWidthPct(mod and mod.id) / 100
         end
 
+        local function dedupePages(pages)
+            local clean_pages = {}
+            local fingerprint = {}
+
+            for _, page in ipairs(pages or {}) do
+                local page_ids = {}
+                local seen = {}
+
+                for _, mod_id in ipairs(page or {}) do
+                    if type(mod_id) == "string" and mod_id ~= "" and not seen[mod_id] then
+                        seen[mod_id] = true
+                        page_ids[#page_ids + 1] = mod_id
+                        fingerprint[#fingerprint + 1] = mod_id
+                        fingerprint[#fingerprint + 1] = ":"
+                        fingerprint[#fingerprint + 1] = tostring(readWidthPct(mod_id))
+                        fingerprint[#fingerprint + 1] = ","
+                    end
+                end
+
+                fingerprint[#fingerprint + 1] = "|"
+                clean_pages[#clean_pages + 1] = page_ids
+            end
+
+            if #clean_pages == 0 then clean_pages[1] = {} end
+            return clean_pages, table.concat(fingerprint)
+        end
+
         local function buildRows(mods)
             local rows = {}
             local row = { cols = {}, total_pct = 0 }
@@ -175,6 +202,11 @@ _G.require = function(modname)
                     rows[#rows + 1] = row
                     row = { cols = {}, total_pct = 0 }
                 end
+            end
+
+            local function startRow(mod, pct)
+                row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
+                row.total_pct = pct
             end
 
             for _, mod in ipairs(mods) do
@@ -189,24 +221,28 @@ _G.require = function(modname)
                     row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
                     row.total_pct = row.total_pct + pct
                 else
-                    local best_col
-                    local best_count
-                    for i = #row.cols, 1, -1 do
-                        local col = row.cols[i]
-                        if math.abs((col.pct or 0) - pct) < 0.01 then
-                            local count = #(col.mods or {})
-                            if not best_count or count < best_count then
-                                best_col = col
-                                best_count = count
+                    if row.total_pct >= 0.999 then
+                        flush()
+                        startRow(mod, pct)
+                    else
+                        local best_col
+                        local best_count
+                        for i = #row.cols, 1, -1 do
+                            local col = row.cols[i]
+                            if math.abs((col.pct or 0) - pct) < 0.01 then
+                                local count = #(col.mods or {})
+                                if not best_count or count < best_count then
+                                    best_col = col
+                                    best_count = count
+                                end
                             end
                         end
-                    end
-                    if best_col then
-                        best_col.mods[#best_col.mods + 1] = mod
-                    else
-                        flush()
-                        row.cols[#row.cols + 1] = { pct = pct, mods = { mod } }
-                        row.total_pct = pct
+                        if best_col then
+                            best_col.mods[#best_col.mods + 1] = mod
+                        else
+                            flush()
+                            startRow(mod, pct)
+                        end
                     end
                 end
             end
@@ -363,22 +399,20 @@ _G.require = function(modname)
             local layout = SUISettings:readSetting("simpleui_layout")
             local raw_order = Registry.loadOrder(PFX)
 
-            local layout_fingerprint = ""
             local pages_by_id = {}
             if layout and type(layout.pages) == "table" then
+                local layout_pages = {}
                 for _, page in ipairs(layout.pages) do
-                    local page_ids = {}
-                    for _, mod_id in ipairs(page.modules) do
-                        page_ids[#page_ids + 1] = mod_id
-                        layout_fingerprint = layout_fingerprint .. mod_id .. ","
+                    if page and type(page.modules) == "table" then
+                        layout_pages[#layout_pages + 1] = page.modules
                     end
-                    layout_fingerprint = layout_fingerprint .. "|"
-                    pages_by_id[#pages_by_id + 1] = page_ids
                 end
+                pages_by_id = layout_pages
             else
                 pages_by_id = deps.splitOrderIntoPages(raw_order)
-                layout_fingerprint = table.concat(raw_order, ",")
             end
+            local layout_fingerprint
+            pages_by_id, layout_fingerprint = dedupePages(pages_by_id)
 
             if not self._enabled_mods_cache
                     or self._enabled_mods_cache.layout_fingerprint ~= layout_fingerprint then
