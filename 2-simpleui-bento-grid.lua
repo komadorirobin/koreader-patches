@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.4"
+local BENTO_GRID_PATCH_VERSION = "2.0.5"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -248,6 +248,45 @@ _G.require = function(modname)
                 widths[i] = w
             end
             return widths
+        end
+
+        local function widgetHeight(widget)
+            if not widget then return 0 end
+            local ok, size = pcall(function() return widget:getSize() end)
+            if ok and size and size.h then return size.h end
+            return (widget.dimen and widget.dimen.h) or 0
+        end
+
+        local function visibleBodyHeight(self, total_pages)
+            local content_h = self._layout_content_h or self._navbar_content_h
+            if not content_h and deps.UI and type(deps.UI.getContentHeight) == "function" then
+                content_h = deps.UI.getContentHeight()
+            end
+            content_h = content_h or deps.Screen:getHeight()
+
+            local navpager_on = deps.Config.isNavpagerEnabled and deps.Config.isNavpagerEnabled()
+            local dot_on = deps.Config.isDotPagerEnabled and deps.Config.isDotPagerEnabled()
+            local pagination_on = deps.SUISettings:nilOrTrue("simpleui_bar_pagination_visible")
+            local hs_pagination_hidden = deps.SUISettings:isTrue("simpleui_hs_pagination_hidden")
+            local show_footer = not hs_pagination_hidden
+                and total_pages > 1
+                and (navpager_on or dot_on or pagination_on)
+
+            local footer_h = 0
+            if show_footer then
+                local footer_widget
+                if navpager_on or dot_on then
+                    footer_widget = self._footer_dot and self._footer_dot.widget
+                else
+                    footer_widget = self._footer_chevron and self._footer_chevron.widget
+                end
+                footer_h = widgetHeight(footer_widget)
+                if footer_h <= 0 and deps.Screen.scaleBySize then
+                    footer_h = deps.Screen:scaleBySize(28)
+                end
+            end
+
+            return math.max(0, content_h - footer_h - deps.MOD_GAP)
         end
 
         local function addModToColumn(self, ctx, col_body, mod, col_w, topbar_on, is_first_in_col, state)
@@ -526,17 +565,21 @@ _G.require = function(modname)
 
             local rows = buildRows(cur_page_mods)
             local COL_GAP = MOD_GAP
+            local max_body_h = visibleBodyHeight(self, total_pages)
+            local used_body_h = 0
 
             for _, row in ipairs(rows) do
                 local first_mod_in_row = row.cols[1] and row.cols[1].mods and row.cols[1].mods[1]
+                local gap_widget
+                local gap_h = 0
                 if first_mod_in_row then
                     local gap_px = mod_gaps[first_mod_in_row.id] or MOD_GAP
                     if first_row then
-                        first_row = false
-                        body[#body + 1] = self:_vspan(topbar_on and gap_px or (gap_px + MOD_GAP))
+                        gap_widget = self:_vspan(topbar_on and gap_px or (gap_px + MOD_GAP))
                     else
-                        body[#body + 1] = self:_vspan(gap_px)
+                        gap_widget = self:_vspan(gap_px)
                     end
+                    gap_h = widgetHeight(gap_widget)
                 end
 
                 local widths = columnWidths(row, inner_w, COL_GAP)
@@ -556,7 +599,24 @@ _G.require = function(modname)
                     end
                 end
 
-                if added_cols > 0 then body[#body + 1] = h_group end
+                if added_cols > 0 then
+                    local row_h = widgetHeight(h_group)
+                    local needed_h = gap_h + row_h
+                    if used_body_h > 0 and max_body_h > 0
+                            and used_body_h + needed_h > max_body_h then
+                        state.overflow_clipped = true
+                        break
+                    end
+                    if gap_widget then body[#body + 1] = gap_widget end
+                    body[#body + 1] = h_group
+                    used_body_h = used_body_h + needed_h
+                    first_row = false
+                end
+            end
+
+            if state.overflow_clipped then
+                logWarn("simpleui bento: clipped overflowing homescreen rows on page "
+                    .. tostring(self._current_page))
             end
 
             if ctx.db_conn_fatal and self._db_conn then
