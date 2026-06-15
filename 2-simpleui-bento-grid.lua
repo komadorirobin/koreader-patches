@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.5"
+local BENTO_GRID_PATCH_VERSION = "2.0.6"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -137,6 +137,8 @@ _G.require = function(modname)
             Screen = getUpValue(original_updatePage, "Screen") or (Device and Device.screen),
             logger = getUpValue(original_updatePage, "logger") or safeRequire("logger"),
             UI = getUpValue(original_updatePage, "UI") or safeRequire("sui_core"),
+            Topbar = safeRequire("sui_topbar"),
+            Bottombar = safeRequire("sui_bottombar"),
             PFX = getUpValue(original_updatePage, "PFX") or "simpleui_hs_",
             MOD_GAP = getUpValue(original_updatePage, "MOD_GAP") or 12,
             SIDE_PAD = getUpValue(original_updatePage, "SIDE_PAD") or 20,
@@ -257,12 +259,32 @@ _G.require = function(modname)
             return (widget.dimen and widget.dimen.h) or 0
         end
 
+        local function strictContentHeight()
+            local screen_h = deps.Screen:getHeight()
+            local topbar_h = 0
+            local navbar_h = 0
+
+            if deps.SUISettings:nilOrTrue("simpleui_topbar_enabled")
+                    and deps.Topbar and type(deps.Topbar.TOTAL_TOP_H) == "function" then
+                local ok, h = pcall(deps.Topbar.TOTAL_TOP_H)
+                if ok and h then topbar_h = h end
+            end
+
+            if deps.Bottombar and type(deps.Bottombar.TOTAL_H) == "function" then
+                local ok, h = pcall(deps.Bottombar.TOTAL_H)
+                if ok and h then navbar_h = h end
+            end
+
+            return math.max(0, screen_h - topbar_h - navbar_h)
+        end
+
         local function visibleBodyHeight(self, total_pages)
+            local strict_h = strictContentHeight()
             local content_h = self._layout_content_h or self._navbar_content_h
             if not content_h and deps.UI and type(deps.UI.getContentHeight) == "function" then
                 content_h = deps.UI.getContentHeight()
             end
-            content_h = content_h or deps.Screen:getHeight()
+            content_h = content_h and math.min(content_h, strict_h) or strict_h
 
             local navpager_on = deps.Config.isNavpagerEnabled and deps.Config.isNavpagerEnabled()
             local dot_on = deps.Config.isDotPagerEnabled and deps.Config.isDotPagerEnabled()
@@ -373,8 +395,14 @@ _G.require = function(modname)
             -- geometry in lockstep before measuring modules, otherwise the
             -- first paint can use stale full-screen height and let old content
             -- show through transparent areas until the next page turn.
-            if deps.UI and type(deps.UI.getContentHeight) == "function" then
-                local content_h = deps.UI.getContentHeight()
+            do
+                local content_h = strictContentHeight()
+                if deps.UI and type(deps.UI.getContentHeight) == "function" then
+                    local ui_content_h = deps.UI.getContentHeight()
+                    if ui_content_h and ui_content_h > 0 then
+                        content_h = math.min(content_h, ui_content_h)
+                    end
+                end
                 if content_h and content_h > 0 then
                     self._navbar_content_h = content_h
                     self._layout_content_h = content_h
