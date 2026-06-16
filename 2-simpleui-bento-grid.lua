@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.7"
+local BENTO_GRID_PATCH_VERSION = "2.0.8"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -332,6 +332,24 @@ _G.require = function(modname)
                 body:paintTo(bb, deps.SIDE_PAD, strictContentTop())
             end)
             pcall(function() bb:free() end)
+        end
+
+        local function scheduleStartupSettleRefresh(self)
+            if not (UIManager and UIManager.scheduleIn and UIManager.setDirty) then return end
+            if self._bento_startup_settle_done or self._bento_startup_settle_scheduled then return end
+
+            self._bento_startup_settle_scheduled = true
+            local self_ref = self
+            UIManager:scheduleIn(0.12, function()
+                self_ref._bento_startup_settle_scheduled = false
+                if self_ref._bento_startup_settle_done then return end
+                if deps.Homescreen and deps.Homescreen._instance ~= self_ref then return end
+                if not self_ref._body then return end
+
+                self_ref._bento_startup_settle_done = true
+                self_ref:_updatePage(true)
+                UIManager:setDirty(self_ref, "full")
+            end)
         end
 
         local function addModToColumn(self, ctx, col_body, mod, col_w, topbar_on, is_first_in_col, state)
@@ -691,6 +709,7 @@ _G.require = function(modname)
             local footer_total = total_pages
             if self._updateFooter then self:_updateFooter(footer_page, footer_total, topbar_on) end
             if deps._updateNavpagerForHS then deps._updateNavpagerForHS(footer_page, footer_total) end
+            scheduleStartupSettleRefresh(self)
 
             if self._clock_body_idx ~= nil then
                 local ClockMod = Registry.get("clock")
