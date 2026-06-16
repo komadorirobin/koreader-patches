@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.6"
+local BENTO_GRID_PATCH_VERSION = "2.0.7"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
@@ -63,6 +63,7 @@ _G.require = function(modname)
         local HorizontalGroup = safeRequire("ui/widget/horizontalgroup")
         local VerticalGroup = safeRequire("ui/widget/verticalgroup")
         local HorizontalSpan = safeRequire("ui/widget/horizontalspan")
+        local Blitbuffer = safeRequire("ffi/blitbuffer")
         local Device = safeRequire("device")
 
         local function settingKey(mod_id)
@@ -278,6 +279,15 @@ _G.require = function(modname)
             return math.max(0, screen_h - topbar_h - navbar_h)
         end
 
+        local function strictContentTop()
+            if deps.SUISettings:nilOrTrue("simpleui_topbar_enabled")
+                    and deps.Topbar and type(deps.Topbar.TOTAL_TOP_H) == "function" then
+                local ok, h = pcall(deps.Topbar.TOTAL_TOP_H)
+                if ok and h then return h end
+            end
+            return 0
+        end
+
         local function visibleBodyHeight(self, total_pages)
             local strict_h = strictContentHeight()
             local content_h = self._layout_content_h or self._navbar_content_h
@@ -309,6 +319,19 @@ _G.require = function(modname)
             end
 
             return math.max(0, content_h - footer_h - deps.MOD_GAP)
+        end
+
+        local function primeBodyDimensions(body)
+            if not (Blitbuffer and body and body.paintTo) then return end
+            local w = math.max(1, deps.Screen:getWidth())
+            local h = math.max(1, deps.Screen:getHeight())
+            local ok, bb = pcall(Blitbuffer.new, w, h, Blitbuffer.TYPE_BB8)
+            if not ok or not bb then return end
+            pcall(function()
+                bb:fill(Blitbuffer.COLOR_WHITE)
+                body:paintTo(bb, deps.SIDE_PAD, strictContentTop())
+            end)
+            pcall(function() bb:free() end)
         end
 
         local function addModToColumn(self, ctx, col_body, mod, col_w, topbar_on, is_first_in_col, state)
@@ -659,6 +682,8 @@ _G.require = function(modname)
                 end
                 body[#body + 1] = empty_widget
             end
+
+            primeBodyDimensions(body)
 
             self.dithered = state.page_has_covers or nil
 
