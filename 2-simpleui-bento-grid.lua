@@ -1,13 +1,88 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.0.8"
+local BENTO_GRID_PATCH_VERSION = "2.1.0"
+local BENTO_GRID_SIMPLEUI_API = "screen-engine-v1"
 
 local function safeRequire(modname)
     local ok, mod = pcall(original_require, modname)
     if ok then return mod end
 end
 
+local function bentoSettingKey(mod_id)
+    return "simpleui_bento_width_" .. tostring(mod_id)
+end
+
+local function readBentoWidthPct(mod_id)
+    local raw = _G.G_reader_settings and _G.G_reader_settings:readSetting(bentoSettingKey(mod_id))
+    local value = tonumber(raw) or 100
+    return math.max(20, math.min(100, value))
+end
+
+local function patchModernModuleMenus(Registry, ScreenEngine)
+    if not Registry or type(Registry.list) ~= "function" then return end
+    local UIManager = safeRequire("ui/uimanager")
+    local SpinWidget = safeRequire("ui/widget/spinwidget")
+
+    for _, mod in ipairs(Registry.list()) do
+        if type(mod.getMenuItems) == "function" and not mod._bento_menu_patched then
+            local orig_getMenuItems = mod.getMenuItems
+            mod.getMenuItems = function(ctx_menu)
+                local items = orig_getMenuItems(ctx_menu)
+                if type(items) ~= "table" then return items end
+                items[#items + 1] = {
+                    text_func = function()
+                        return "Bento Grid Column Width (" .. readBentoWidthPct(mod.id) .. "%)"
+                    end,
+                    keep_menu_open = true,
+                    separator = true,
+                    callback = function()
+                        if not UIManager or not SpinWidget then return end
+                        UIManager:show(SpinWidget:new{
+                            title_text    = "Bento Grid Column Width",
+                            info_text     = "Set the module width used by the Bento Grid.\nModules that fit in the same row are placed side by side.",
+                            value         = readBentoWidthPct(mod.id),
+                            value_min     = 20,
+                            value_max     = 100,
+                            value_step    = 5,
+                            unit          = "%",
+                            ok_text       = "Apply",
+                            cancel_text   = "Cancel",
+                            default_value = 100,
+                            callback      = function(spin)
+                                if _G.G_reader_settings then
+                                    _G.G_reader_settings:saveSetting(bentoSettingKey(mod.id), spin.value)
+                                end
+                                if ctx_menu and ctx_menu.refresh then ctx_menu.refresh() end
+                                if ScreenEngine and ScreenEngine.rebuildAllLayouts and UIManager.scheduleIn then
+                                    UIManager:scheduleIn(0.1, function()
+                                        ScreenEngine.rebuildAllLayouts()
+                                    end)
+                                end
+                            end,
+                        })
+                    end,
+                }
+                return items
+            end
+            mod._bento_menu_patched = true
+        end
+    end
+end
+
 -- Override standard require to patch specific KOReader modules as they load.
 _G.require = function(modname)
+    -- SimpleUI 2.6+ moved homescreen rendering into a shared screen engine.
+    -- Use its narrow Bento API instead of replacing the complete _updatePage
+    -- implementation, keeping upstream cache and refresh fixes intact.
+    if modname == "engines/sui_screen_engine" then
+        local loaded = original_require(modname)
+        if loaded and type(loaded.installBentoGrid) == "function" and not loaded._bento_patched then
+            loaded.installBentoGrid(readBentoWidthPct)
+            patchModernModuleMenus(safeRequire("modules/moduleregistry"), loaded)
+            loaded._bento_patched = true
+        end
+        return loaded
+    end
+
     -- =========================================================
     -- Appearance Plugin Compatibility Fix (Color Devices)
     -- =========================================================
