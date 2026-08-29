@@ -1,5 +1,5 @@
 local original_require = require
-local BENTO_GRID_PATCH_VERSION = "2.1.0"
+local BENTO_GRID_PATCH_VERSION = "2.1.1"
 local BENTO_GRID_SIMPLEUI_API = "screen-engine-v1"
 
 local function safeRequire(modname)
@@ -75,6 +75,13 @@ _G.require = function(modname)
     -- implementation, keeping upstream cache and refresh fixes intact.
     if modname == "engines/sui_screen_engine" then
         local loaded = original_require(modname)
+        -- SimpleUI beta.3+ owns Bento persistence, menus and rendering. Leave
+        -- the native implementation untouched; this patch remains useful for
+        -- older SimpleUI versions and for the compatibility fixes below.
+        if loaded and loaded.BENTO_GRID_NATIVE then
+            loaded._bento_patched = true
+            return loaded
+        end
         if loaded and type(loaded.installBentoGrid) == "function" and not loaded._bento_patched then
             loaded.installBentoGrid(readBentoWidthPct)
             patchModernModuleMenus(safeRequire("modules/moduleregistry"), loaded)
